@@ -39,19 +39,16 @@ with tab1:
         sel_room_id = room_options[selected_room_name]
         current_room = next(r for r in rooms_data if r['room_id'] == sel_room_id)
 
-        # 1. 닉네임 입력 (중간에 튕겨도 재접속 가능)
+        # 1. 닉네임 입력
         if f"player_name_{sel_room_id}" not in st.session_state:
             st.write("---")
             p_name = st.text_input("사용할 닉네임을 입력하세요")
             if st.button("방 입장하기"):
                 if p_name:
-                    # 💡 핵심: 기존에 같은 이름으로 들어온 적이 있는지 확인
                     existing_player = supabase.table("players").select("*").eq("room_id", sel_room_id).eq("player_name", p_name).execute().data
                     if not existing_player:
-                        # 없으면 새로 추가
                         supabase.table("players").insert({"room_id": sel_room_id, "player_name": p_name}).execute()
                     
-                    # 상태 복구하고 입장!
                     st.session_state[f"player_name_{sel_room_id}"] = p_name
                     st.rerun()
                 else:
@@ -64,7 +61,7 @@ with tab1:
             
             total_questions = len(supabase.table("questions").select("id").eq("room_id", sel_room_id).execute().data)
 
-            # [대기실] 출제자 시작 기다리기
+            # [대기실]
             if not current_room["is_started"]:
                 needs_refresh = True 
                 st.info("⏳ 출제자가 퀴즈쇼를 시작할 때까지 대기해주세요...")
@@ -86,14 +83,12 @@ with tab1:
                 my_sub = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("player_name", p_name).eq("q_index", cur_q_idx).execute().data
                 
                 if my_sub:
-                    # 제출 완료 후 남들 기다릴 때
                     needs_refresh = True
                     st.success("✅ 제출 완료! 다른 참가자들이 모두 풀 때까지 대기해주세요.")
                     
                     all_players = supabase.table("players").select("*").eq("room_id", sel_room_id).execute().data
                     all_subs = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("q_index", cur_q_idx).execute().data
                     
-                    # 💡 참가자 화면에도 '미제출자' 목록 보여주기
                     sub_names = [s['player_name'] for s in all_subs]
                     unsub_names = [p['player_name'] for p in all_players if p['player_name'] not in sub_names]
                     
@@ -104,7 +99,6 @@ with tab1:
                         supabase.table("quiz_room").update({"current_index": cur_q_idx + 1}).eq("room_id", sel_room_id).execute()
                         st.rerun()
                 else:
-                    # 문제 푸는 중
                     with st.form(key=f"form_{sel_room_id}_{cur_q_idx}"):
                         if q_data["q_type"] == "객관식":
                             opt_list = [x.strip() for x in q_data["options"].split(",")]
@@ -247,7 +241,6 @@ with tab2:
                 st.warning("문제를 최소 1개 이상 만들어야 시작할 수 있습니다.")
 
         else:
-            # 퀴즈쇼 진행 중 관전 -> 실시간 현황을 봐야하므로 새로고침 ON 🌟
             needs_refresh = True
             st.subheader("👀 실시간 관전 모드")
             if h_room["current_index"] > total_q:
@@ -259,12 +252,25 @@ with tab2:
                 all_players = supabase.table("players").select("*").eq("room_id", h_room_id).execute().data
                 subs = supabase.table("submissions").select("*").eq("room_id", h_room_id).eq("q_index", h_room['current_index']).execute().data
                 
-                # 💡 출제자 화면에 제출/미제출 현황 깔끔하게 분리해서 보여주기
                 sub_names = [s['player_name'] for s in subs]
                 unsub_names = [p['player_name'] for p in all_players if p['player_name'] not in sub_names]
                 
                 st.write(f"✅ **제출 완료 ({len(sub_names)}명):** {', '.join(sub_names) if sub_names else '없음'}")
                 st.error(f"⏳ **미제출 대기자 ({len(unsub_names)}명):** {', '.join(unsub_names) if unsub_names else '없음'}")
+
+        # 💡 방 완전 삭제 기능 추가
+        st.write("---")
+        with st.expander("🚨 퀴즈쇼 방 완전 삭제 (위험)"):
+            st.warning("이 방에 등록된 문제, 참가자, 제출 내역이 모두 영구적으로 삭제됩니다. 복구할 수 없습니다.")
+            if st.button("🗑️ 이 방 삭제하기", type="primary"):
+                # 관련된 모든 데이터 싹쓸이 삭제
+                supabase.table("submissions").delete().eq("room_id", h_room_id).execute()
+                supabase.table("players").delete().eq("room_id", h_room_id).execute()
+                supabase.table("questions").delete().eq("room_id", h_room_id).execute()
+                supabase.table("quiz_room").delete().eq("room_id", h_room_id).execute()
+                
+                del st.session_state["host_room_id"] # 로그인 풀기
+                st.rerun()
 
 # ==========================================
 # 🌟 똑똑한 자동 새로고침 실행기
