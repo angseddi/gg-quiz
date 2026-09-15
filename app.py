@@ -4,7 +4,7 @@ from streamlit_autorefresh import st_autorefresh
 import time
 import pandas as pd
 
-# --- 1. Supabase 연결 ---
+# --- 1. Supabase 연결 및 자동 새로고침 ---
 @st.cache_resource
 def init_connection():
     url = st.secrets["SUPABASE_URL"]
@@ -12,198 +12,233 @@ def init_connection():
     return create_client(url, key)
 
 supabase = init_connection()
-
-# --- 2. 실시간 자동 새로고침 (2초마다) ---
 st_autorefresh(interval=2000, key="quiz_refresher")
 
-# --- 3. 유틸리티 함수 ---
-def get_room_state():
-    try:
-        res = supabase.table("quiz_room").select("*").eq("id", 1).execute()
-        data = res.data
-        if len(data) == 0:
-            new_room = {"id": 1, "is_started": False, "current_index": 1, "host_pwd": "1234"}
-            supabase.table("quiz_room").upsert(new_room).execute()
-            return new_room
-        return data[0]
-    except Exception as e:
-        st.error(f"🚨 데이터베이스 에러 상세 내용: {e}")
-        st.stop()
+st.title("🏆 Case Review 퀴즈쇼")
 
-def get_questions():
-    data = supabase.table("questions").select("*").order("q_index").execute().data
-    return data
+# DB에서 생성된 모든 퀴즈 방 목록 가져오기
+try:
+    rooms_data = supabase.table("quiz_room").select("*").order("created_at", desc=True).execute().data
+except:
+    st.error("데이터베이스 연결 중입니다...")
+    st.stop()
 
-def check_all_submitted(current_q_index):
-    players = supabase.table("players").select("*").execute().data
-    subs = supabase.table("submissions").select("*").eq("q_index", current_q_index).execute().data
-    
-    # 참가자가 최소 1명 이상이고, 제출자 수가 참가자 수와 같거나 크면 다음 문제로
-    if len(players) > 0 and len(subs) >= len(players):
-        time.sleep(1) # 제출 완료 화면을 잠깐 보여주기 위한 딜레이
-        supabase.table("quiz_room").update({"current_index": current_q_index + 1}).eq("id", 1).execute()
-
-# --- 4. 화면 구성 ---
-st.title("🏆 n/n Case Review 퀴즈쇼")
-
-# 상태 불러오기
-room = get_room_state()
-questions = get_questions()
-total_q = len(questions)
-
-# 사이드바: 역할 선택
-role = st.sidebar.radio("접속 권한을 선택하세요", ["참가자 (Player)", "출제자 (Host)"])
+# 화면 상단 탭 분리
+tab1, tab2 = st.tabs(["🙋‍♂️ 퀴즈 참가하기", "👨‍🏫 출제자 메뉴"])
 
 # ==========================================
-# [출제자 모드]
+# [TAB 1: 참가자 모드]
 # ==========================================
-if role == "출제자 (Host)":
-    pwd = st.sidebar.text_input("출제자 비밀번호", type="password")
-    
-    if pwd != room["host_pwd"]:
-        st.warning("출제자 비밀번호를 입력해주세요.")
+with tab1:
+    if not rooms_data:
+        st.info("현재 열려있는 퀴즈쇼가 없습니다. 출제자가 방을 먼저 만들어야 합니다.")
     else:
-        st.sidebar.success("출제자 인증 완료!")
-        
-        # 아직 퀴즈 시작 전이면 문제 출제 화면
-        if not room["is_started"]:
-            st.subheader("🛠️ 문제 출제 및 수정")
-            
-            with st.expander("새 문제 추가하기"):
-                q_idx = st.number_input("문제 번호", min_value=1, value=total_q + 1)
-                q_type = st.radio("문제 유형", ["객관식", "주관식"])
-                q_text = st.text_area("문제 내용")
-                img_url = st.text_input("이미지 URL (선택사항, 구글 이미지 링크 등)")
-                
-                if q_type == "객관식":
-                    options = st.text_input("보기 (쉼표로 구분. 예: 사과,바나나,포도)")
-                    ans = st.text_input("정답 (보기 중 하나와 정확히 일치하게 입력)")
+        # 1. 방 리스트업 및 선택
+        room_options = {f"[{r['quiz_title']}] (출제자: {r['host_name']})": r['room_id'] for r in rooms_data}
+        selected_room_name = st.selectbox("참가할 퀴즈쇼를 선택하세요", list(room_options.keys()), key="player_room_select")
+        sel_room_id = room_options[selected_room_name]
+        current_room = next(r for r in rooms_data if r['room_id'] == sel_room_id)
+
+        # 2. 닉네임 입력 및 입장
+        if f"player_name_{sel_room_id}" not in st.session_state:
+            p_name = st.text_input("사용할 닉네임을 입력하세요")
+            if st.button("방 입장하기"):
+                if p_name:
+                    supabase.table("players").insert({"room_id": sel_room_id, "player_name": p_name}).execute()
+                    st.session_state[f"player_name_{sel_room_id}"] = p_name
+                    st.rerun()
                 else:
-                    options = ""
-                    ans = st.text_input("정답 입력")
-                    
-                if st.button("문제 저장"):
-                    supabase.table("questions").upsert({
-                        "q_index": q_idx, "q_type": q_type, "q_text": q_text, 
-                        "img_url": img_url, "options": options, "answer": ans
-                    }).execute()
-                    st.success("문제가 저장되었습니다!")
-            
-            # 참가자 대기 현황
-            players = supabase.table("players").select("*").execute().data
-            st.write(f"현재 접속한 참가자: **{len(players)}명**")
-            
-            if st.button("🚀 퀴즈쇼 시작하기", use_container_width=True):
-                supabase.table("quiz_room").update({"is_started": True, "current_index": 1}).eq("id", 1).execute()
-        
-        # 퀴즈 진행 중 관전 화면
+                    st.warning("닉네임을 입력해주세요.")
         else:
-            st.subheader("👀 실시간 관전 모드")
-            if room["current_index"] > total_q:
-                st.success("모든 퀴즈가 종료되었습니다!")
-                if st.button("퀴즈쇼 초기화 (다시 시작)"):
-                    supabase.table("quiz_room").update({"is_started": False, "current_index": 1}).eq("id", 1).execute()
-                    supabase.table("players").delete().neq("name", "dummy").execute()
-                    supabase.table("submissions").delete().neq("id", 0).execute()
-            else:
-                st.write(f"### 현재 진행 중: {room['current_index']}번 문제")
-                st.progress(room["current_index"] / total_q)
-                
-                subs = supabase.table("submissions").select("*").eq("q_index", room['current_index']).execute().data
-                st.write(f"제출 현황: {len(subs)}명 제출 완료")
-                for s in subs:
-                    st.write(f"✅ {s['player_name']} 제출 완료")
-                
-                st.warning("참가자 전원이 제출하면 자동으로 다음 문제로 넘어갑니다.")
+            p_name = st.session_state[f"player_name_{sel_room_id}"]
+            st.success(f"👤 **{p_name}**님 입장 완료!")
+            
+            total_questions = len(supabase.table("questions").select("id").eq("room_id", sel_room_id).execute().data)
 
-# ==========================================
-# [참가자 모드]
-# ==========================================
-elif role == "참가자 (Player)":
-    
-    # 닉네임 입력 전
-    if "player_name" not in st.session_state:
-        st.subheader("입장하기")
-        p_name = st.text_input("사용할 닉네임을 입력하세요")
-        if st.button("입장"):
-            if p_name:
-                supabase.table("players").upsert({"name": p_name}).execute()
-                st.session_state["player_name"] = p_name
-            else:
-                st.error("닉네임을 입력해주세요.")
-    
-    # 닉네임 입력 후 (로비 또는 게임 진행)
-    else:
-        p_name = st.session_state["player_name"]
-        st.write(f"👤 **{p_name}**님 환영합니다!")
-        
-        # 1. 퀴즈 시작 전 (대기실)
-        if not room["is_started"]:
-            st.info("⏳ 출제자가 퀴즈쇼를 시작할 때까지 대기해주세요...")
+            # [대기실]
+            if not current_room["is_started"]:
+                st.info("⏳ 출제자가 퀴즈쇼를 시작할 때까지 대기해주세요...")
+                players = supabase.table("players").select("*").eq("room_id", sel_room_id).execute().data
+                st.write(f"현재 입장 인원: **{len(players)}명**")
+                for p in players:
+                    st.write(f"- {p['player_name']}")
             
-            players = supabase.table("players").select("*").execute().data
-            st.write("---")
-            st.write("현재 입장한 사람들:")
-            for p in players:
-                st.write(f"- {p['name']}")
+            # [게임 진행]
+            elif current_room["is_started"] and current_room["current_index"] <= total_questions:
+                cur_q_idx = current_room["current_index"]
+                q_data = supabase.table("questions").select("*").eq("room_id", sel_room_id).eq("q_index", cur_q_idx).execute().data[0]
                 
-        # 2. 퀴즈 진행 중
-        elif room["is_started"] and room["current_index"] <= total_q:
-            cur_q_idx = room["current_index"]
-            q_data = next((item for item in questions if item["q_index"] == cur_q_idx), None)
-            
-            if q_data:
                 st.write("---")
                 st.subheader(f"Q{cur_q_idx}. {q_data['q_text']}")
-                
                 if q_data['img_url']:
                     st.image(q_data['img_url'], use_container_width=True)
                 
-                # 이미 제출했는지 확인
-                my_sub = supabase.table("submissions").select("*").eq("player_name", p_name).eq("q_index", cur_q_idx).execute().data
+                # 제출 여부 확인
+                my_sub = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("player_name", p_name).eq("q_index", cur_q_idx).execute().data
                 
                 if my_sub:
                     st.success("✅ 제출 완료! 다른 참가자들이 모두 풀 때까지 대기해주세요.")
-                    check_all_submitted(cur_q_idx) # 자동 넘김 체크 로직 실행
+                    
+                    # 자동 넘김 체크 로직
+                    all_players = supabase.table("players").select("*").eq("room_id", sel_room_id).execute().data
+                    all_subs = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("q_index", cur_q_idx).execute().data
+                    if len(all_players) > 0 and len(all_subs) >= len(all_players):
+                        time.sleep(1)
+                        supabase.table("quiz_room").update({"current_index": cur_q_idx + 1}).eq("room_id", sel_room_id).execute()
+                        st.rerun()
                 else:
-                    # 문제 풀기 폼
-                    with st.form(key=f"form_{cur_q_idx}"):
+                    with st.form(key=f"form_{sel_room_id}_{cur_q_idx}"):
                         if q_data["q_type"] == "객관식":
                             opt_list = [x.strip() for x in q_data["options"].split(",")]
                             user_ans = st.radio("정답을 선택하세요", opt_list)
                         else:
                             user_ans = st.text_input("정답을 입력하세요")
                             
-                        submit_btn = st.form_submit_button("제출하기")
-                        
-                        if submit_btn:
+                        if st.form_submit_button("제출하기"):
                             is_correct = (user_ans.strip() == q_data["answer"].strip())
                             supabase.table("submissions").insert({
+                                "room_id": sel_room_id,
                                 "player_name": p_name,
                                 "q_index": cur_q_idx,
                                 "submitted_answer": user_ans,
                                 "is_correct": is_correct
                             }).execute()
-                            st.rerun() # 화면 즉시 갱신
+                            st.rerun()
                             
-        # 3. 퀴즈 종료 (결과 화면)
-        elif room["is_started"] and room["current_index"] > total_q:
-            st.balloons()
-            st.subheader("🎉 퀴즈쇼 종료! 최종 결과 🎉")
-            
-            # 점수 계산 로직
-            subs = supabase.table("submissions").select("*").execute().data
-            df = pd.DataFrame(subs)
-            if not df.empty:
-                # 정답 수 기준 정렬, 정답 수가 같으면 제출 시간이 빠른 순(created_at)
-                correct_df = df[df['is_correct'] == True]
-                leaderboard = correct_df.groupby('player_name').size().reset_index(name='score')
+            # [결과 화면]
+            elif current_room["is_started"] and current_room["current_index"] > total_questions:
+                st.balloons()
+                st.subheader("🎉 퀴즈쇼 종료! 최종 결과 🎉")
+                subs = supabase.table("submissions").select("*").eq("room_id", sel_room_id).execute().data
+                df = pd.DataFrame(subs)
+                if not df.empty:
+                    correct_df = df[df['is_correct'] == True]
+                    if not correct_df.empty:
+                        leaderboard = correct_df.groupby('player_name').size().reset_index(name='score')
+                        leaderboard = leaderboard.sort_values(by='score', ascending=False).reset_index(drop=True)
+                        for i, row in leaderboard.iterrows():
+                            medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🔹"
+                            st.markdown(f"### {medal} {i+1}등: {row['player_name']} ({row['score']}문제 정답)")
+                    else:
+                        st.write("정답자가 없습니다 😭")
+                else:
+                    st.write("제출된 답안이 없습니다.")
+
+
+# ==========================================
+# [TAB 2: 출제자 모드]
+# ==========================================
+with tab2:
+    if "host_room_id" not in st.session_state:
+        # 1. 방을 만들거나 로그인하는 화면
+        host_action = st.radio("메뉴 선택", ["새로운 퀴즈쇼 만들기", "기존 퀴즈쇼 관리하기 (로그인)"])
+        
+        if host_action == "새로운 퀴즈쇼 만들기":
+            with st.form("new_room_form", clear_on_submit=True):
+                new_title = st.text_input("퀴즈쇼 제목 (예: 9월 3주차 Case)")
+                new_host = st.text_input("출제자 이름 (예: 홍길동)")
+                new_pwd = st.text_input("이 방의 관리자 비밀번호 설정", type="password")
                 
-                # 순위 표시
-                leaderboard = leaderboard.sort_values(by='score', ascending=False).reset_index(drop=True)
-                
-                for i, row in leaderboard.iterrows():
-                    medal = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else "🔹"
-                    st.markdown(f"### {medal} {i+1}등: {row['player_name']} ({row['score']}문제 정답)")
+                if st.form_submit_button("방 만들기"):
+                    if new_title and new_host and new_pwd:
+                        supabase.table("quiz_room").insert({
+                            "quiz_title": new_title, "host_name": new_host, "host_pwd": new_pwd
+                        }).execute()
+                        st.success("✅ 방이 생성되었습니다! 위의 메뉴를 '기존 퀴즈쇼 관리하기'로 변경하여 방에 입장해주세요.")
+                    else:
+                        st.error("모든 항목을 입력해주세요.")
+        
+        else: # 기존 방 로그인
+            if not rooms_data:
+                st.warning("아직 만들어진 퀴즈쇼가 없습니다. 방을 먼저 만들어주세요.")
             else:
-                st.write("제출된 정답이 없습니다.")
+                room_options = {f"[{r['quiz_title']}] (출제자: {r['host_name']})": r['room_id'] for r in rooms_data}
+                host_selected_name = st.selectbox("관리할 퀴즈쇼 선택", list(room_options.keys()))
+                host_sel_id = room_options[host_selected_name]
+                host_pwd_input = st.text_input("비밀번호 입력", type="password")
+                
+                if st.button("출제자 로그인"):
+                    target_room = next(r for r in rooms_data if r['room_id'] == host_sel_id)
+                    if host_pwd_input == target_room['host_pwd']:
+                        st.session_state["host_room_id"] = host_sel_id
+                        st.rerun()
+                    else:
+                        st.error("비밀번호가 틀렸습니다!")
+    
+    else:
+        # 2. 로그인 완료된 출제자 대시보드
+        h_room_id = st.session_state["host_room_id"]
+        h_room = next((r for r in rooms_data if r['room_id'] == h_room_id), None)
+        
+        if not h_room:
+            del st.session_state["host_room_id"]
+            st.rerun()
+
+        st.write(f"### 👑 [{h_room['quiz_title']}] 관리자 패널")
+        if st.button("로그아웃 (방 나가기)"):
+            del st.session_state["host_room_id"]
+            st.rerun()
+            
+        st.write("---")
+        
+        questions = supabase.table("questions").select("*").eq("room_id", h_room_id).order("q_index").execute().data
+        total_q = len(questions)
+
+        if not h_room["is_started"]:
+            st.subheader("📝 퀴즈 문제 만들기")
+            
+            # 기존 문제 현황 (토글로 깔끔하게 정리)
+            if total_q > 0:
+                with st.expander(f"✅ 지금까지 저장된 문제 확인하기 (총 {total_q}개)"):
+                    for q in questions:
+                        st.write(f"**Q{q['q_index']}.** {q['q_text']} (정답: {q['answer']})")
+            else:
+                st.info("아직 등록된 문제가 없습니다. 첫 번째 문제를 만들어주세요!")
+
+            # 폼 자동 초기화 (clear_on_submit=True)
+            st.write(f"#### ✨ {total_q + 1}번 문제 추가하기")
+            with st.form("add_question_form", clear_on_submit=True):
+                q_type = st.radio("문제 유형", ["객관식", "주관식"])
+                q_text = st.text_area("문제 내용")
+                img_url = st.text_input("이미지 URL (선택사항)")
+                options = st.text_input("객관식 보기 (쉼표로 구분, 주관식은 비워둠)")
+                answer = st.text_input("정답 입력 (객관식은 보기 중 하나와 정확히 일치해야 함)")
+                
+                # 버튼 문구를 직관적으로 변경
+                submit_btn = st.form_submit_button(f"{total_q + 1}번 문제 저장하고 다음 칸 비우기 ➔")
+                
+                if submit_btn:
+                    if not q_text or not answer:
+                        st.error("문제 내용과 정답은 필수입니다!")
+                    else:
+                        supabase.table("questions").insert({
+                            "room_id": h_room_id, "q_index": total_q + 1, "q_type": q_type,
+                            "q_text": q_text, "img_url": img_url, "options": options, "answer": answer
+                        }).execute()
+                        st.success(f"저장 성공! 칸이 비워졌으니 바로 {total_q + 2}번 문제를 작성해주세요.")
+                        st.rerun()
+            
+            st.write("---")
+            players = supabase.table("players").select("*").eq("room_id", h_room_id).execute().data
+            st.write(f"👥 현재 대기실 접속자: **{len(players)}명**")
+            
+            if total_q > 0:
+                if st.button("🚀 퀴즈쇼 시작하기", type="primary", use_container_width=True):
+                    supabase.table("quiz_room").update({"is_started": True, "current_index": 1}).eq("room_id", h_room_id).execute()
+                    st.rerun()
+            else:
+                st.warning("문제를 최소 1개 이상 만들어야 시작할 수 있습니다.")
+
+        else:
+            # 퀴즈쇼 진행 중 관전
+            st.subheader("👀 실시간 관전 모드")
+            if h_room["current_index"] > total_q:
+                st.success("🎉 모든 퀴즈가 종료되었습니다!")
+            else:
+                st.write(f"### 현재 진행 중: {h_room['current_index']}번 문제")
+                st.progress(h_room["current_index"] / total_q)
+                
+                subs = supabase.table("submissions").select("*").eq("room_id", h_room_id).eq("q_index", h_room['current_index']).execute().data
+                st.write(f"제출 현황: {len(subs)}명 제출 완료")
+                for s in subs:
+                    st.write(f"✅ {s['player_name']} 제출 완료")
