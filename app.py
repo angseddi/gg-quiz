@@ -1,3 +1,19 @@
+실제 퀴즈쇼를 운영할 때 발생할 수 있는 아주 현실적이고 중요한 질문들입니다!
+
+두 가지 질문에 대한 답은 모두 "가능하게 만들 수 있다!" 입니다.
+
+중간에 튕기거나 나갔을 때 재접속:
+우리는 데이터베이스(Supabase)에 제출 내역을 모두 안전하게 저장해 두고 있습니다. 따라서 참가자가 튕겼다가 똑같은 닉네임으로 다시 들어오면, 방금 전까지 풀었던 상태 그대로 복구되도록 로그인 로직을 조금만 다듬어 주면 완벽하게 해결됩니다. (현재 문제는, 똑같은 이름으로 들어오면 "새로운 사람"으로 인식해서 DB에 똑같은 이름이 2개씩 쌓일 위험이 있었습니다.)
+
+누가 안 풀었는지 확인 (미제출자 목록):
+출제자의 관전 화면뿐만 아니라, "먼저 풀고 기다리는 참가자 화면"에도 아직 안 푼 사람이 누구누구 남았는지 띄워주면 기다리는 시간이 훨씬 덜 지루하고 쫄깃해질 것입니다.
+
+이 두 가지 디테일을 추가한 최종 완성형 코드를 준비했습니다.
+
+💻 app.py 최종 업데이트 (GitHub)
+이전과 똑같이 GitHub 웹 에디터에서 app.py 안의 모든 내용을 지우고, 아래 코드로 갈아 끼운 뒤 저장(Commit & Push)해 주세요!
+
+Python
 import streamlit as st
 from supabase import create_client
 from streamlit_autorefresh import st_autorefresh
@@ -13,7 +29,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# 🌟 스마트 새로고침 통제 변수 (기본값: 새로고침 안 함)
+# 🌟 스마트 새로고침 통제 변수
 needs_refresh = False
 
 st.title("🏆 Case Review 퀴즈쇼")
@@ -39,13 +55,19 @@ with tab1:
         sel_room_id = room_options[selected_room_name]
         current_room = next(r for r in rooms_data if r['room_id'] == sel_room_id)
 
-        # 1. 닉네임 입력 (이때는 새로고침 OFF, 방해 금지!)
+        # 1. 닉네임 입력 (중간에 튕겨도 재접속 가능)
         if f"player_name_{sel_room_id}" not in st.session_state:
             st.write("---")
             p_name = st.text_input("사용할 닉네임을 입력하세요")
             if st.button("방 입장하기"):
                 if p_name:
-                    supabase.table("players").insert({"room_id": sel_room_id, "player_name": p_name}).execute()
+                    # 💡 핵심: 기존에 같은 이름으로 들어온 적이 있는지 확인
+                    existing_player = supabase.table("players").select("*").eq("room_id", sel_room_id).eq("player_name", p_name).execute().data
+                    if not existing_player:
+                        # 없으면 새로 추가
+                        supabase.table("players").insert({"room_id": sel_room_id, "player_name": p_name}).execute()
+                    
+                    # 상태 복구하고 입장!
                     st.session_state[f"player_name_{sel_room_id}"] = p_name
                     st.rerun()
                 else:
@@ -54,11 +76,11 @@ with tab1:
         # 2. 방 입장 완료 후
         else:
             p_name = st.session_state[f"player_name_{sel_room_id}"]
-            st.success(f"👤 **{p_name}**님 입장 완료!")
+            st.success(f"👤 **{p_name}**님 입장 완료! (재접속 시 이어서 풀 수 있습니다)")
             
             total_questions = len(supabase.table("questions").select("id").eq("room_id", sel_room_id).execute().data)
 
-            # [대기실] 출제자 시작 기다리기 -> 새로고침 ON 🌟
+            # [대기실] 출제자 시작 기다리기
             if not current_room["is_started"]:
                 needs_refresh = True 
                 st.info("⏳ 출제자가 퀴즈쇼를 시작할 때까지 대기해주세요...")
@@ -80,18 +102,25 @@ with tab1:
                 my_sub = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("player_name", p_name).eq("q_index", cur_q_idx).execute().data
                 
                 if my_sub:
-                    # 제출 완료 후 남들 기다릴 때 -> 새로고침 ON 🌟
+                    # 제출 완료 후 남들 기다릴 때
                     needs_refresh = True
                     st.success("✅ 제출 완료! 다른 참가자들이 모두 풀 때까지 대기해주세요.")
                     
                     all_players = supabase.table("players").select("*").eq("room_id", sel_room_id).execute().data
                     all_subs = supabase.table("submissions").select("*").eq("room_id", sel_room_id).eq("q_index", cur_q_idx).execute().data
+                    
+                    # 💡 참가자 화면에도 '미제출자' 목록 보여주기
+                    sub_names = [s['player_name'] for s in all_subs]
+                    unsub_names = [p['player_name'] for p in all_players if p['player_name'] not in sub_names]
+                    
+                    st.info(f"👀 현재 아직 풀고 있는 사람: **{', '.join(unsub_names) if unsub_names else '없음'}**")
+                    
                     if len(all_players) > 0 and len(all_subs) >= len(all_players):
                         time.sleep(1)
                         supabase.table("quiz_room").update({"current_index": cur_q_idx + 1}).eq("room_id", sel_room_id).execute()
                         st.rerun()
                 else:
-                    # 문제 푸는 중 -> 새로고침 OFF (글씨 쓰는 도중 날아감 방지)
+                    # 문제 푸는 중
                     with st.form(key=f"form_{sel_room_id}_{cur_q_idx}"):
                         if q_data["q_type"] == "객관식":
                             opt_list = [x.strip() for x in q_data["options"].split(",")]
@@ -110,7 +139,7 @@ with tab1:
                             }).execute()
                             st.rerun()
                             
-            # [결과 화면] 다 끝남 -> 새로고침 OFF
+            # [결과 화면] 
             elif current_room["is_started"] and current_room["current_index"] > total_questions:
                 st.balloons()
                 st.subheader("🎉 퀴즈쇼 종료! 최종 결과 🎉")
@@ -187,7 +216,6 @@ with tab2:
         total_q = len(questions)
 
         if not h_room["is_started"]:
-            # 출제자가 문제를 타이핑할 때 방해되지 않도록 자동 새로고침 OFF
             st.subheader("📝 퀴즈 문제 만들기")
             
             if total_q > 0:
@@ -219,7 +247,6 @@ with tab2:
                         st.rerun()
             
             st.write("---")
-            # 새로고침이 수동으로 필요하므로 버튼 제공
             col1, col2 = st.columns([3, 1])
             players = supabase.table("players").select("*").eq("room_id", h_room_id).execute().data
             with col1:
@@ -245,13 +272,18 @@ with tab2:
                 st.write(f"### 현재 진행 중: {h_room['current_index']}번 문제")
                 st.progress(h_room["current_index"] / total_q)
                 
+                all_players = supabase.table("players").select("*").eq("room_id", h_room_id).execute().data
                 subs = supabase.table("submissions").select("*").eq("room_id", h_room_id).eq("q_index", h_room['current_index']).execute().data
-                st.write(f"제출 현황: {len(subs)}명 제출 완료")
-                for s in subs:
-                    st.write(f"✅ {s['player_name']} 제출 완료")
+                
+                # 💡 출제자 화면에 제출/미제출 현황 깔끔하게 분리해서 보여주기
+                sub_names = [s['player_name'] for s in subs]
+                unsub_names = [p['player_name'] for p in all_players if p['player_name'] not in sub_names]
+                
+                st.write(f"✅ **제출 완료 ({len(sub_names)}명):** {', '.join(sub_names) if sub_names else '없음'}")
+                st.error(f"⏳ **미제출 대기자 ({len(unsub_names)}명):** {', '.join(unsub_names) if unsub_names else '없음'}")
 
 # ==========================================
-# 🌟 똑똑한 자동 새로고침 실행기 (코드 맨 밑에 있어야 합니다!)
+# 🌟 똑똑한 자동 새로고침 실행기
 # ==========================================
 if needs_refresh:
     st_autorefresh(interval=2000, key="smart_refresher")
