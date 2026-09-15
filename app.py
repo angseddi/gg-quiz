@@ -22,7 +22,7 @@ def get_room_state():
     if len(res) == 0: # 1번 방 데이터가 비어있다면
         # 방을 자동으로 새로 생성합니다.
         new_room = {"id": 1, "is_started": False, "current_index": 1, "host_pwd": "1234"}
-        supabase.table("quiz_room").insert(new_room).execute()
+        supabase.table("quiz_room").upsert(new_room).execute()
         return new_room
     return res[0]
 
