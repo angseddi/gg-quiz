@@ -107,7 +107,13 @@ with tab1:
                             user_ans = st.text_input("정답을 입력하세요")
                             
                         if st.form_submit_button("제출하기"):
-                            is_correct = (user_ans.strip() == q_data["answer"].strip())
+                            # 💡 띄어쓰기 무시 채점 로직
+                            if q_data["q_type"] == "객관식":
+                                is_correct = (user_ans.strip() == q_data["answer"].strip())
+                            else:
+                                # 주관식은 참가자가 낸 답과 실제 답의 띄어쓰기를 모두 없앤 후 비교
+                                is_correct = (user_ans.replace(" ", "") == q_data["answer"].replace(" ", ""))
+
                             supabase.table("submissions").insert({
                                 "room_id": sel_room_id,
                                 "player_name": p_name,
@@ -244,7 +250,34 @@ with tab2:
             needs_refresh = True
             st.subheader("👀 실시간 관전 모드")
             if h_room["current_index"] > total_q:
+                # 💡 퀴즈 종료 시 출제자용 상세 결과 화면
+                needs_refresh = False # 끝났으니 새로고침 끄기
                 st.success("🎉 모든 퀴즈가 종료되었습니다!")
+                
+                st.write("---")
+                st.subheader("📊 참가자별 상세 제출 내역")
+                subs = supabase.table("submissions").select("*").eq("room_id", h_room_id).execute().data
+                df = pd.DataFrame(subs)
+                
+                if not df.empty:
+                    players_list = df['player_name'].unique()
+                    for p in players_list:
+                        p_subs = df[df['player_name'] == p].sort_values('q_index')
+                        score = p_subs['is_correct'].sum()
+                        
+                        # 참가자별로 열어볼 수 있는 아코디언 메뉴
+                        with st.expander(f"👤 {p} (총 {score}점)"):
+                            for _, row in p_subs.iterrows():
+                                q_info = next((q for q in questions if q['q_index'] == row['q_index']), None)
+                                if q_info:
+                                    ox = "✅" if row['is_correct'] else "❌"
+                                    st.write(f"**Q{row['q_index']}. {q_info['q_text']}**")
+                                    st.write(f"➔ 낸 답: `{row['submitted_answer']}` {ox}")
+                                    if not row['is_correct']:
+                                        st.write(f"*(실제 정답: {q_info['answer']})*")
+                else:
+                    st.write("제출된 답안이 없습니다.")
+                    
             else:
                 st.write(f"### 현재 진행 중: {h_room['current_index']}번 문제")
                 st.progress(h_room["current_index"] / total_q)
@@ -258,18 +291,17 @@ with tab2:
                 st.write(f"✅ **제출 완료 ({len(sub_names)}명):** {', '.join(sub_names) if sub_names else '없음'}")
                 st.error(f"⏳ **미제출 대기자 ({len(unsub_names)}명):** {', '.join(unsub_names) if unsub_names else '없음'}")
 
-        # 💡 방 완전 삭제 기능 추가
+        # 방 완전 삭제 기능
         st.write("---")
         with st.expander("🚨 퀴즈쇼 방 완전 삭제 (위험)"):
             st.warning("이 방에 등록된 문제, 참가자, 제출 내역이 모두 영구적으로 삭제됩니다. 복구할 수 없습니다.")
             if st.button("🗑️ 이 방 삭제하기", type="primary"):
-                # 관련된 모든 데이터 싹쓸이 삭제
                 supabase.table("submissions").delete().eq("room_id", h_room_id).execute()
                 supabase.table("players").delete().eq("room_id", h_room_id).execute()
                 supabase.table("questions").delete().eq("room_id", h_room_id).execute()
                 supabase.table("quiz_room").delete().eq("room_id", h_room_id).execute()
                 
-                del st.session_state["host_room_id"] # 로그인 풀기
+                del st.session_state["host_room_id"]
                 st.rerun()
 
 # ==========================================
